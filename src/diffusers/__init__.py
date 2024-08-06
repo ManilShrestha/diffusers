@@ -309,6 +309,9 @@ else:
             "StableDiffusion3Img2ImgPipeline",
             "StableDiffusion3InpaintPipeline",
             "StableDiffusion3Pipeline",
+            
+            "StableDiffusion3PipelineSplitClient",
+
             "StableDiffusionAdapterPipeline",
             "StableDiffusionAttendAndExcitePipeline",
             "StableDiffusionControlNetImg2ImgPipeline",
@@ -732,6 +735,9 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             StableDiffusion3Img2ImgPipeline,
             StableDiffusion3InpaintPipeline,
             StableDiffusion3Pipeline,
+            
+            StableDiffusion3PipelineSplitClient,
+
             StableDiffusionAdapterPipeline,
             StableDiffusionAttendAndExcitePipeline,
             StableDiffusionControlNetImg2ImgPipeline,

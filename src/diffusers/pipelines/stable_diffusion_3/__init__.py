@@ -27,6 +27,8 @@ else:
     _import_structure["pipeline_stable_diffusion_3_img2img"] = ["StableDiffusion3Img2ImgPipeline"]
     _import_structure["pipeline_stable_diffusion_3_inpaint"] = ["StableDiffusion3InpaintPipeline"]
 
+    _import_structure["pipeline_stable_diffusion_3_split"] = ["StableDiffusion3PipelineSplitClient"]
+
 if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     try:
         if not (is_transformers_available() and is_torch_available()):
@@ -35,6 +37,9 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from ...utils.dummy_torch_and_transformers_objects import *  # noqa F403
     else:
         from .pipeline_stable_diffusion_3 import StableDiffusion3Pipeline
+        
+        from .pipeline_stable_diffusion_3_split import StableDiffusion3PipelineSplitClient
+
         from .pipeline_stable_diffusion_3_img2img import StableDiffusion3Img2ImgPipeline
         from .pipeline_stable_diffusion_3_inpaint import StableDiffusion3InpaintPipeline
 

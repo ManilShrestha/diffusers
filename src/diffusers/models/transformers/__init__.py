@@ -16,3 +16,4 @@ if is_torch_available():
     from .transformer_flux import FluxTransformer2DModel
     from .transformer_sd3 import SD3Transformer2DModel
     from .transformer_temporal import TransformerTemporalModel
+    from .transformer_sd3_split import SD3Transformer2DModelPart1, SD3Transformer2DModelPart2
