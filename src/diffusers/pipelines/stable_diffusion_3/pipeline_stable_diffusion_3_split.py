@@ -882,7 +882,7 @@ class StableDiffusion3PipelineSplitClient(DiffusionPipeline, SD3LoraLoaderMixin,
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
 
-                height, width = hidden_states.shape[-2:]
+                # height, width = hidden_states.shape[-2:]
 
                 hidden_states, encoder_hidden_states, temb = self.transformer_split1(
                     hidden_states=latent_model_input,
@@ -893,7 +893,7 @@ class StableDiffusion3PipelineSplitClient(DiffusionPipeline, SD3LoraLoaderMixin,
                     # return_dict=False,
                 )
 
-                noise_pred = self.transformer_split2(hidden_states, encoder_hidden_states, temb, height, width)[0]
+                noise_pred = self.transformer_split2(hidden_states, encoder_hidden_states, temb)[0]
 
                 # perform guidance
                 if self.do_classifier_free_guidance:

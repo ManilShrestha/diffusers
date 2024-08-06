@@ -23,7 +23,6 @@ class SD3Transformer2DModelPart1(ModelMixin, ConfigMixin, PeftAdapterMixin, From
         self.out_channels = self.config_temp.out_channels if self.config_temp.out_channels is not None else self.config_temp.in_channels
         self.inner_dim = self.config_temp.num_attention_heads * self.config_temp.attention_head_dim
 
-
         self.pos_embed = PatchEmbed(
             height=self.config_temp.sample_size,
             width=self.config_temp.sample_size,
