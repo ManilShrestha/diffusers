@@ -17,7 +17,7 @@ from ..embeddings import CombinedTimestepTextProjEmbeddings, PatchEmbed
 
 
 class SD3Transformer2DModelPart1(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
-    def __init__(self, config, blocks):
+    def __init__(self, config, blocks, time_text_embed_state_dict, context_embedder_state_dict, pos_embed_state_dict):
         super().__init__()
         self.config_temp= config
         self.out_channels = self.config_temp.out_channels if self.config_temp.out_channels is not None else self.config_temp.in_channels
@@ -31,31 +31,40 @@ class SD3Transformer2DModelPart1(ModelMixin, ConfigMixin, PeftAdapterMixin, From
             embed_dim=self.inner_dim,
             pos_embed_max_size=self.config_temp.pos_embed_max_size,
         )
+        self.pos_embed.load_state_dict(pos_embed_state_dict)
+
         self.time_text_embed = CombinedTimestepTextProjEmbeddings(
             embedding_dim=self.inner_dim, pooled_projection_dim=self.config_temp.pooled_projection_dim
         )
+        self.time_text_embed.load_state_dict(time_text_embed_state_dict)
+
         self.context_embedder = nn.Linear(self.config_temp.joint_attention_dim, self.config_temp.caption_projection_dim)
+        self.context_embedder.load_state_dict(context_embedder_state_dict)
 
         self.transformer_blocks = blocks
 
     def forward(self, hidden_states, encoder_hidden_states, pooled_projections, timestep):
+        height_, width_ = hidden_states.shape[-2:]
+
         hidden_states = self.pos_embed(hidden_states)
         temb = self.time_text_embed(timestep, pooled_projections)
         encoder_hidden_states = self.context_embedder(encoder_hidden_states)
+
+
 
         for block in self.transformer_blocks:
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
             )
 
-        return hidden_states, encoder_hidden_states, temb
+        return hidden_states, encoder_hidden_states, temb, height_, width_
 
     @property
     def config(self):
         return self.config_temp
 
 class SD3Transformer2DModelPart2(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
-    def __init__(self, config, blocks):
+    def __init__(self, config, blocks, norm_out_state_dict, proj_out_state_dict):
         super().__init__()
         self.config_temp= config
         self.inner_dim = self.config_temp.num_attention_heads * self.config_temp.attention_head_dim
@@ -63,9 +72,14 @@ class SD3Transformer2DModelPart2(ModelMixin, ConfigMixin, PeftAdapterMixin, From
         self.transformer_blocks = blocks
 
         self.norm_out = AdaLayerNormContinuous(self.inner_dim, self.inner_dim, elementwise_affine=False, eps=1e-6)
+
+        self.norm_out.load_state_dict(norm_out_state_dict)
+
         self.proj_out = nn.Linear(self.inner_dim, self.config_temp.patch_size * self.config_temp.patch_size * self.config_temp.out_channels, bias=True)
 
-    def forward(self, hidden_states, encoder_hidden_states, temb):
+        self.proj_out.load_state_dict(proj_out_state_dict)
+
+    def forward(self, hidden_states, encoder_hidden_states, temb, height_, width_):
         for block in self.transformer_blocks:
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
@@ -76,13 +90,14 @@ class SD3Transformer2DModelPart2(ModelMixin, ConfigMixin, PeftAdapterMixin, From
 
         patch_size = self.config_temp.patch_size
 
-        height = self.config_temp.sample_size // patch_size
-        width = self.config_temp.sample_size // patch_size
+        height = height_ // patch_size
+        width = width_ // patch_size
 
         hidden_states = hidden_states.reshape(
             shape=(hidden_states.shape[0], height, width, patch_size, patch_size, self.config_temp.out_channels)
         )
-        print(hidden_states.shape)
+        
+
         hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
         output = hidden_states.reshape(
             shape=(hidden_states.shape[0], self.config_temp.out_channels, height * patch_size, width * patch_size)

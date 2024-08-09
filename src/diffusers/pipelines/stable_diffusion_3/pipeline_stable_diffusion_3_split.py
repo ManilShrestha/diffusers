@@ -882,9 +882,9 @@ class StableDiffusion3PipelineSplitClient(DiffusionPipeline, SD3LoraLoaderMixin,
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
 
-                # height, width = hidden_states.shape[-2:]
+                # TODO: Further split the embedding projection and first 2 layers to run in the client itself.
 
-                hidden_states, encoder_hidden_states, temb = self.transformer_split1(
+                hidden_states, encoder_hidden_states, temb, h, w = self.transformer_split1(
                     hidden_states=latent_model_input,
                     timestep=timestep,
                     encoder_hidden_states=prompt_embeds,
@@ -893,7 +893,7 @@ class StableDiffusion3PipelineSplitClient(DiffusionPipeline, SD3LoraLoaderMixin,
                     # return_dict=False,
                 )
 
-                noise_pred = self.transformer_split2(hidden_states, encoder_hidden_states, temb)[0]
+                noise_pred = self.transformer_split2(hidden_states, encoder_hidden_states, temb, h, w)[0]
 
                 # perform guidance
                 if self.do_classifier_free_guidance:
