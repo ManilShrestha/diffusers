@@ -28,6 +28,7 @@ else:
     _import_structure["pipeline_stable_diffusion_3_inpaint"] = ["StableDiffusion3InpaintPipeline"]
 
     _import_structure["pipeline_stable_diffusion_3_split"] = ["StableDiffusion3PipelineSplitClient"]
+    _import_structure["pipeline_stable_diffusion_3_split_socket"] = ["StableDiffusion3PipelineSplitClientSocket"]
 
 if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     try:
@@ -39,6 +40,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from .pipeline_stable_diffusion_3 import StableDiffusion3Pipeline
         
         from .pipeline_stable_diffusion_3_split import StableDiffusion3PipelineSplitClient
+        from .pipeline_stable_diffusion_3_split_socket import StableDiffusion3PipelineSplitClientSocket
 
         from .pipeline_stable_diffusion_3_img2img import StableDiffusion3Img2ImgPipeline
         from .pipeline_stable_diffusion_3_inpaint import StableDiffusion3InpaintPipeline

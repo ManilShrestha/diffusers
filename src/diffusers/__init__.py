@@ -311,6 +311,7 @@ else:
             "StableDiffusion3Pipeline",
             
             "StableDiffusion3PipelineSplitClient",
+            "StableDiffusion3PipelineSplitClientSocket",
 
             "StableDiffusionAdapterPipeline",
             "StableDiffusionAttendAndExcitePipeline",
@@ -737,6 +738,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             StableDiffusion3Pipeline,
             
             StableDiffusion3PipelineSplitClient,
+            StableDiffusion3PipelineSplitClientSocket,
 
             StableDiffusionAdapterPipeline,
             StableDiffusionAttendAndExcitePipeline,

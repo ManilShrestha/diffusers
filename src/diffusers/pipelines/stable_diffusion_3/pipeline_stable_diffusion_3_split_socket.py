@@ -15,6 +15,10 @@
 import inspect
 from typing import Any, Callable, Dict, List, Optional, Union
 
+import socket
+import pickle
+import struct
+
 import torch
 from transformers import (
     CLIPTextModelWithProjection,
@@ -38,6 +42,7 @@ from ...utils import (
     replace_example_docstring,
     scale_lora_layers,
     unscale_lora_layers,
+    TransformerSplitConfig,
 )
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
@@ -130,7 +135,7 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-class StableDiffusion3PipelineSplitClient(DiffusionPipeline, SD3LoraLoaderMixin, FromSingleFileMixin):
+class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoaderMixin, FromSingleFileMixin):
     r"""
     Args:
         transformer ([`SD3Transformer2DModel`]):
@@ -171,8 +176,7 @@ class StableDiffusion3PipelineSplitClient(DiffusionPipeline, SD3LoraLoaderMixin,
     def __init__(
         self,
 
-        transformer_split1: SD3Transformer2DModelPart1,
-        transformer_split2: SD3Transformer2DModelPart2,
+        transformer_split_config: TransformerSplitConfig,
 
         scheduler: FlowMatchEulerDiscreteScheduler,
         vae: AutoencoderKL,
@@ -194,11 +198,12 @@ class StableDiffusion3PipelineSplitClient(DiffusionPipeline, SD3LoraLoaderMixin,
             tokenizer_2=tokenizer_2,
             tokenizer_3=tokenizer_3,
 
-            transformer_split1=transformer_split1,
-            transformer_split2=transformer_split2,
+            transformer_split_config=transformer_split_config,
 
             scheduler=scheduler,
         )
+
+
         self.vae_scale_factor = (
             2 ** (len(self.vae.config.block_out_channels) - 1) if hasattr(self, "vae") and self.vae is not None else 8
         )
@@ -207,10 +212,42 @@ class StableDiffusion3PipelineSplitClient(DiffusionPipeline, SD3LoraLoaderMixin,
             self.tokenizer.model_max_length if hasattr(self, "tokenizer") and self.tokenizer is not None else 77
         )
         self.default_sample_size = (
-            self.transformer_split1.config.sample_size
+            self.transformer_split_config.config["pipe_config"].sample_size
             if hasattr(self, "transformer") and self.transformer_split1 is not None
             else 128
         )
+    
+    
+
+    def send_request_to_transformer(self, input_data, host='0.0.0.0', port=9876):
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_socket.connect((host, port))
+        
+        # Serialize the data
+        serialized_data = pickle.dumps(input_data)
+        
+        # Send the size of the data first
+        size = len(serialized_data)
+        client_socket.sendall(struct.pack('>I', size))
+        
+        # Then send the data
+        client_socket.sendall(serialized_data)
+
+        # Receive the response
+        response_size = struct.unpack('>I', client_socket.recv(4))[0]
+        chunks = []
+        bytes_recd = 0
+        while bytes_recd < response_size:
+            chunk = client_socket.recv(min(response_size - bytes_recd, 2048))
+            if chunk == b'':
+                raise RuntimeError("socket connection broken")
+            chunks.append(chunk)
+            bytes_recd = bytes_recd + len(chunk)
+        data = b''.join(chunks)
+        
+        output = pickle.loads(data)
+        client_socket.close()
+        return output
 
     def _get_t5_prompt_embeds(
         self,
@@ -231,7 +268,7 @@ class StableDiffusion3PipelineSplitClient(DiffusionPipeline, SD3LoraLoaderMixin,
                 (
                     batch_size * num_images_per_prompt,
                     self.tokenizer_max_length,
-                    self.transformer_split1.config.joint_attention_dim,
+                    self.transformer_split_config.config["pipe_config"].joint_attention_dim,
                 ),
                 device=device,
                 dtype=dtype,
@@ -859,7 +896,7 @@ class StableDiffusion3PipelineSplitClient(DiffusionPipeline, SD3LoraLoaderMixin,
         self._num_timesteps = len(timesteps)
 
         # 5. Prepare latent variables
-        num_channels_latents = self.transformer_split1.config.in_channels
+        num_channels_latents = self.transformer_split_config.config["pipe_config"].in_channels
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,
@@ -884,18 +921,25 @@ class StableDiffusion3PipelineSplitClient(DiffusionPipeline, SD3LoraLoaderMixin,
 
                 # TODO: Further split the embedding projection and first 2 layers to run in the client itself.
 
-                hidden_states, encoder_hidden_states, temb, h, w = self.transformer_split1(
-                    hidden_states=latent_model_input,
-                    timestep=timestep,
-                    encoder_hidden_states=prompt_embeds,
-                    pooled_projections=pooled_prompt_embeds,
-                    # joint_attention_kwargs=self.joint_attention_kwargs,
-                    # return_dict=False,
-                )
+                # hidden_states, encoder_hidden_states, temb, h, w = self.transformer_split1(
+                #     hidden_states=latent_model_input,
+                #     timestep=timestep,
+                #     encoder_hidden_states=prompt_embeds,
+                #     pooled_projections=pooled_prompt_embeds,
+                #     # joint_attention_kwargs=self.joint_attention_kwargs,
+                #     # return_dict=False,
+                # )
+                # noise_pred = self.transformer_split2(hidden_states, encoder_hidden_states, temb, h, w)[0]
 
-                print(hidden_states.shape, encoder_hidden_states.shape, temb.shape, h, w)
-                
-                noise_pred = self.transformer_split2(hidden_states, encoder_hidden_states, temb, h, w)[0]
+                # Prepare the packet to send to splits
+                output_intermediate = (latent_model_input, prompt_embeds, pooled_prompt_embeds, timestep)
+                for split_idx in range(self.transformer_split_config.config["num_splits"]):
+                    # send the packets to and fro the splits to calculate the noise pred
+                    output_intermediate = self.send_request_to_transformer(output_intermediate
+                                                                           ,host=self.transformer_split_config.config["hosts"][split_idx]
+                                                                           ,port=self.transformer_split_config.config["ports"][split_idx])
+
+                noise_pred = output_intermediate[0].to(device)
 
                 # perform guidance
                 if self.do_classifier_free_guidance:

@@ -265,7 +265,8 @@ else:
         "StableDiffusion3Pipeline",
         "StableDiffusion3Img2ImgPipeline",
         "StableDiffusion3InpaintPipeline",
-        "StableDiffusion3PipelineSplitClient"
+        "StableDiffusion3PipelineSplitClient",
+        "StableDiffusion3PipelineSplitClientSocket"
     ]
     _import_structure["stable_diffusion_attend_and_excite"] = ["StableDiffusionAttendAndExcitePipeline"]
     _import_structure["stable_diffusion_safe"] = ["StableDiffusionPipelineSafe"]
@@ -570,6 +571,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             StableDiffusion3InpaintPipeline,
             StableDiffusion3Pipeline,
             StableDiffusion3PipelineSplitClient,
+            StableDiffusion3PipelineSplitClientSocket,
         )
         from .stable_diffusion_attend_and_excite import StableDiffusionAttendAndExcitePipeline
         from .stable_diffusion_diffedit import StableDiffusionDiffEditPipeline
