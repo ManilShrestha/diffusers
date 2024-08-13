@@ -2,6 +2,8 @@
 import torch
 import torch.nn as nn
 
+import diffusers
+
 from ...configuration_utils import ConfigMixin, register_to_config
 from ...loaders import FromOriginalModelMixin, PeftAdapterMixin
 from ...models.modeling_utils import ModelMixin
@@ -16,7 +18,11 @@ from ..embeddings import CombinedTimestepTextProjEmbeddings, PatchEmbed
 # from ...models.attention_processor import Attention, AttentionProcessor, FusedJointAttnProcessor2_0
 
 
-class SD3Transformer2DModelPart1(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
+class SD3Transformer2DModelClientSplit(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
+    """
+    Client side transformer. Preferably first block will be processed in client side.
+    Hence, latent noise prediction and states remain hidden
+    """
     def __init__(self, config, blocks, time_text_embed_state_dict, context_embedder_state_dict, pos_embed_state_dict):
         super().__init__()
         self.config_temp= config
@@ -50,10 +56,13 @@ class SD3Transformer2DModelPart1(ModelMixin, ConfigMixin, PeftAdapterMixin, From
         temb = self.time_text_embed(timestep, pooled_projections)
         encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
-
-
-        for block in self.transformer_blocks:
-            encoder_hidden_states, hidden_states = block(
+        if not isinstance(self.transformer_blocks, diffusers.models.attention.JointTransformerBlock):
+            for block in self.transformer_blocks:
+                encoder_hidden_states, hidden_states = block(
+                    hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
+                )
+        else:
+            encoder_hidden_states, hidden_states = self.transformer_blocks(
                 hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
             )
 
@@ -63,20 +72,20 @@ class SD3Transformer2DModelPart1(ModelMixin, ConfigMixin, PeftAdapterMixin, From
     def config(self):
         return self.config_temp
 
-class SD3Transformer2DModelPart2(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
-    def __init__(self, config, blocks, norm_out_state_dict, proj_out_state_dict):
+
+class SD3Transformer2DModelServerSplit(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
+    def __init__(self, config, blocks, norm_out_state_dict, proj_out_state_dict, has_last_block=False):
         super().__init__()
         self.config_temp= config
-        self.inner_dim = self.config_temp.num_attention_heads * self.config_temp.attention_head_dim
+        self.is_last_block = is_last_block
 
+        self.inner_dim = self.config_temp.num_attention_heads * self.config_temp.attention_head_dim
         self.transformer_blocks = blocks
 
         self.norm_out = AdaLayerNormContinuous(self.inner_dim, self.inner_dim, elementwise_affine=False, eps=1e-6)
-
         self.norm_out.load_state_dict(norm_out_state_dict)
 
         self.proj_out = nn.Linear(self.inner_dim, self.config_temp.patch_size * self.config_temp.patch_size * self.config_temp.out_channels, bias=True)
-
         self.proj_out.load_state_dict(proj_out_state_dict)
 
     def forward(self, hidden_states, encoder_hidden_states, temb, height_, width_):
@@ -84,7 +93,12 @@ class SD3Transformer2DModelPart2(ModelMixin, ConfigMixin, PeftAdapterMixin, From
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
             )
+        
+        # If not last block, return the intermediate data for next blocks to process
+        if not self.is_last_block:
+            return hidden_states, encoder_hidden_states, temb, height_, width_
 
+        # If it is the last block, further process and return the noise prediction
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)
 
@@ -97,7 +111,6 @@ class SD3Transformer2DModelPart2(ModelMixin, ConfigMixin, PeftAdapterMixin, From
             shape=(hidden_states.shape[0], height, width, patch_size, patch_size, self.config_temp.out_channels)
         )
         
-
         hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
         output = hidden_states.reshape(
             shape=(hidden_states.shape[0], self.config_temp.out_channels, height * patch_size, width * patch_size)

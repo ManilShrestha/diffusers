@@ -28,7 +28,7 @@ from ...loaders import FromSingleFileMixin, SD3LoraLoaderMixin
 from ...models.autoencoders import AutoencoderKL
 from ...models.transformers import SD3Transformer2DModel
 
-from ...models.transformers import SD3Transformer2DModelPart1, SD3Transformer2DModelPart2
+from ...models.transformers import SD3Transformer2DModelClientSplit, SD3Transformer2DModelServerSplit
 
 from ...schedulers import FlowMatchEulerDiscreteScheduler
 from ...utils import (
@@ -171,8 +171,8 @@ class StableDiffusion3PipelineSplitClient(DiffusionPipeline, SD3LoraLoaderMixin,
     def __init__(
         self,
 
-        transformer_split1: SD3Transformer2DModelPart1,
-        transformer_split2: SD3Transformer2DModelPart2,
+        transformer_split1: SD3Transformer2DModelClientSplit,
+        transformer_split2: SD3Transformer2DModelServerSplit,
 
         scheduler: FlowMatchEulerDiscreteScheduler,
         vae: AutoencoderKL,
