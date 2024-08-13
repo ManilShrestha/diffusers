@@ -56,6 +56,7 @@ class SD3Transformer2DModelClientSplit(ModelMixin, ConfigMixin, PeftAdapterMixin
         temb = self.time_text_embed(timestep, pooled_projections)
         encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
+        # Checking if it is just a single block or chain of blocks
         if not isinstance(self.transformer_blocks, diffusers.models.attention.JointTransformerBlock):
             for block in self.transformer_blocks:
                 encoder_hidden_states, hidden_states = block(
@@ -77,7 +78,7 @@ class SD3Transformer2DModelServerSplit(ModelMixin, ConfigMixin, PeftAdapterMixin
     def __init__(self, config, blocks, norm_out_state_dict, proj_out_state_dict, has_last_block=False):
         super().__init__()
         self.config_temp= config
-        self.is_last_block = is_last_block
+        self.has_last_block = has_last_block
 
         self.inner_dim = self.config_temp.num_attention_heads * self.config_temp.attention_head_dim
         self.transformer_blocks = blocks
@@ -95,7 +96,7 @@ class SD3Transformer2DModelServerSplit(ModelMixin, ConfigMixin, PeftAdapterMixin
             )
         
         # If not last block, return the intermediate data for next blocks to process
-        if not self.is_last_block:
+        if not self.has_last_block:
             return hidden_states, encoder_hidden_states, temb, height_, width_
 
         # If it is the last block, further process and return the noise prediction

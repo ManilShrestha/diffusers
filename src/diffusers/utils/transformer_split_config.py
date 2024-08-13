@@ -1,4 +1,26 @@
 class TransformerSplitConfig:
+    """
+    Manages configuration for splitting a transformer model across multiple hosts.
+
+    Methods:
+    --------
+    __init__(num_splits, hosts, ports, pipe_config):
+        Initializes with the number of splits, hosts, ports, and pipeline config.
+        Raises ValueError if hosts or ports don't match num_splits.
+
+    get_config():
+        Returns the current configuration.
+
+    add_split(host, port):
+        Adds a host and port, increasing the number of splits.
+
+    remove_split(index):
+        Removes a split by index. Raises IndexError if out of bounds.
+
+    __str__():
+        Returns the configuration as a string.
+    """
+    
     def __init__(self, num_splits, hosts, ports, pipe_config):
         if len(hosts) != num_splits or len(ports) != num_splits:
             raise ValueError("Number of hosts and ports must match the number of splits")
