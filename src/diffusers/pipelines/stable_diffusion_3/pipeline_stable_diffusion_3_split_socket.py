@@ -922,34 +922,24 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
 
-                # TODO: Further split the embedding projection and first 2 layers to run in the client itself.
-
-                # hidden_states, encoder_hidden_states, temb, h, w = self.transformer_split1(
-                #     hidden_states=latent_model_input,
-                #     timestep=timestep,
-                #     encoder_hidden_states=prompt_embeds,
-                #     pooled_projections=pooled_prompt_embeds,
-                #     # joint_attention_kwargs=self.joint_attention_kwargs,
-                #     # return_dict=False,
-                # )
-                # noise_pred = self.transformer_split2(hidden_states, encoder_hidden_states, temb, h, w)[0]
-
                 # Prepare the packet to send to splits
-                
-                
                 hidden_states, encoder_hidden_states, temb, height_, width_ = self.transformer_client_split(
                         hidden_states=latent_model_input, 
                         encoder_hidden_states=prompt_embeds, 
                         pooled_projections=pooled_prompt_embeds, 
                         timestep=timestep)
+                
+                # Put them in cpu before passing sending to distributed servers
+                hidden_states, encoder_hidden_states, temb = hidden_states.to('cpu'), encoder_hidden_states.to('cpu'), temb.to('cpu')
 
                 output_intermediate = (hidden_states, encoder_hidden_states, temb, height_, width_)
 
                 for split_idx in range(self.transformer_server_split_config.config["num_splits"]):
                     # send the packets to and fro the splits to calculate the noise pred
+                    
                     output_intermediate = self.send_request_to_transformer(output_intermediate
                                                                            ,host=self.transformer_server_split_config.config["hosts"][split_idx]
-                                                                           ,port=self.transformer_server_split_config.config["ports"][split_idx])
+                                                                           ,port=self.transformer_server_split_config.config["ports"][split_idx]) 
 
                 noise_pred = output_intermediate[0].to(device)   # TODO: Plot and see what this looks like
 
