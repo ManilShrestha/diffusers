@@ -47,6 +47,11 @@ from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from .pipeline_output import StableDiffusion3PipelineOutput
 
+import concurrent.futures
+import torch.nn.functional as F
+import numpy as np
+
+
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
 
@@ -203,7 +208,6 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
 
             scheduler=scheduler,
         )
-
 
         self.vae_scale_factor = (
             2 ** (len(self.vae.config.block_out_channels) - 1) if hasattr(self, "vae") and self.vae is not None else 8
@@ -702,6 +706,59 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
     def interrupt(self):
         return self._interrupt
 
+
+    def validate_redundant_work(self, results, threshold=0.99):
+        """
+        Validates the consistency of work done by different servers by comparing perceptual hashes of their results.
+
+        Args:
+            results (list of list of torch.Tensor): List of results from different servers. Each element is a list of tensors representing the output of a task.
+            threshold (float, optional): Similarity threshold for hash comparison. Defaults to 0.99.
+
+        Returns:
+            bool: True if all tensor hashes are within the threshold difference, False otherwise.
+        """
+        from scipy.fft import dctn
+
+        def perceptual_hash(tensor, hash_size=8):
+            if len(tensor.shape) == 4:  # [N, C, H, W]
+                tensor = tensor.mean(dim=(0, 1))  # Average over N and C dimensions to get [H, W]
+            elif len(tensor.shape) == 3:  # [C, H, W]
+                tensor = tensor.mean(dim=0)  # Average over C dimension to get [H, W]
+            
+            tensor = F.interpolate(tensor.unsqueeze(0).unsqueeze(0), size=(128, 128), mode='bilinear').squeeze()
+            dct = torch.from_numpy(dctn(tensor.numpy(), norm='ortho'))
+
+            # Keep only the top-left (hash_size x hash_size) DCT coefficients
+            dct_low_freq = dct[:hash_size, :hash_size]
+            med = dct_low_freq.median().item()    # Compute the median of the DCT coefficients
+
+            # Generate hash: 1 if DCT coefficient is greater than median, else 0
+            phash = ''.join('1' if dct_low_freq[i, j] > med else '0' for i in range(hash_size) for j in range(hash_size))
+            return phash
+
+        def hamming_distance(hash1, hash2):
+            if len(hash1) != len(hash2):
+                raise ValueError("Hash lengths must be equal")
+            return sum(c1 != c2 for c1, c2 in zip(hash1, hash2))
+
+        def hash_similarity(hash1, hash2):
+            distance = hamming_distance(hash1, hash2)
+            max_distance = len(hash1)
+            return 1 - (distance / max_distance)
+
+        tensor_indices = [i for i, item in enumerate(results[0]) if isinstance(item, torch.Tensor)]
+        
+        for t_idx in tensor_indices:
+            base_hash = perceptual_hash(results[0][t_idx].to('cpu'))
+            for r in results[1:]:
+                compare_hash = perceptual_hash(r[t_idx].to('cpu'))
+                if hash_similarity(base_hash, compare_hash)<threshold:
+                    return False
+        
+        return True
+        # torch.save(results,'/home/ms5267/blockentropy/models/results_multi_server.pth')
+
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
@@ -911,6 +968,7 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
 
         self.transformer_client_split = self.transformer_client_split.to(device)
 
+        
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -934,15 +992,45 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
 
                 output_intermediate = (hidden_states, encoder_hidden_states, temb, height_, width_)
 
+                
                 for split_idx in range(self.transformer_server_split_config.config["num_splits"]):
-                    # send the packets to and fro the splits to calculate the noise pred
+                    # Redundant work for different servers parallel
+                    if self.transformer_server_split_config.enable_work_validation:
+                        p = len(self.transformer_server_split_config.config["hosts"][split_idx])
+                        
+                        def send_to_server(server_idx):
+                            return self.send_request_to_transformer(
+                                output_intermediate,
+                                host=self.transformer_server_split_config.config["hosts"][split_idx][server_idx],
+                                port=self.transformer_server_split_config.config["ports"][split_idx][server_idx]
+                            )
+                        
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=p) as executor:
+                            futures = [executor.submit(send_to_server, server_idx) for server_idx in range(p)]
+                            results = [future.result() for future in concurrent.futures.as_completed(futures)]
+                        
+                        torch.save(results,'/home/ms5267/blockentropy/models/results_socket.pth')
+
+                        # Validate the returned results with LSH and result must be within threshold
+                        if self.validate_redundant_work(results):
+                            output_intermediate = results[0]
+                        else:
+                            raise ValueError("Inconsistent results from distributed servers")
+                     
+                    # No redundant work validation
+                    else:
+                        output_intermediate = self.send_request_to_transformer(output_intermediate
+                                                                            ,host=self.transformer_server_split_config.config["hosts"][split_idx]
+                                                                            ,port=self.transformer_server_split_config.config["ports"][split_idx])
                     
-                    output_intermediate = self.send_request_to_transformer(output_intermediate
-                                                                           ,host=self.transformer_server_split_config.config["hosts"][split_idx]
-                                                                           ,port=self.transformer_server_split_config.config["ports"][split_idx]) 
+                    # if t==timesteps[-1] and split_idx==0:
+                    #     torch.save(output_intermediate,'/home/ms5267/blockentropy/models/output_intermediate.pth')
 
-                noise_pred = output_intermediate[0].to(device)   # TODO: Plot and see what this looks like
+                # After final denoisification    
+                noise_pred = output_intermediate[0].to(device)   
 
+                # torch.save(noise_pred, '/home/ms5267/blockentropy/models/noise_2.pth')
+                           
                 # perform guidance
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)

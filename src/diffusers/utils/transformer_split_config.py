@@ -21,16 +21,25 @@ class TransformerSplitConfig:
         Returns the configuration as a string.
     """
     
-    def __init__(self, num_splits, hosts, ports, pipe_config):
-        if len(hosts) != num_splits or len(ports) != num_splits:
-            raise ValueError("Number of hosts and ports must match the number of splits")
-        
+    def __init__(self, num_splits, hosts, ports, pipe_config, enable_work_validation=False):
+        # If enable_work_validation is True, the hosts and ports need to be lists of lists
+        # Example: hosts: [[0.0.0.0,10.0.0.0], [2.2.2.2,3.3.3.3]]
+        self.enable_work_validation = enable_work_validation
+        if enable_work_validation:
+            assert all(isinstance(h, list) for h in hosts), "When enable_work_validation is True, hosts must be a list of lists."
+            assert all(isinstance(p, list) for p in ports), "When enable_work_validation is True, ports must be a list of lists."
+            assert len(hosts) == num_splits and len(ports) == num_splits, \
+                "Number of hosts and ports must match the number of splits."
+
+        else:
+            if len(hosts) != num_splits or len(ports) != num_splits:
+                raise ValueError("Number of hosts and ports must match the number of splits")
+
         self.config = {
             "num_splits": num_splits,
             "hosts": hosts,
             "ports": ports,
             "pipe_config": pipe_config
-            
         }
 
     def get_config(self):
