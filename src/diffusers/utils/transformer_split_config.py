@@ -21,13 +21,13 @@ class TransformerSplitConfig:
         Returns the configuration as a string.
     """
     
-    def __init__(self, num_splits, hosts, ports, pipe_config, enable_work_validation=False):
+    def __init__(self, num_splits, hosts, ports, pipe_config, redundant_distributed_servers=False):
         # If enable_work_validation is True, the hosts and ports need to be lists of lists
         # Example: hosts: [[0.0.0.0,10.0.0.0], [2.2.2.2,3.3.3.3]]
-        self.enable_work_validation = enable_work_validation
-        if enable_work_validation:
-            assert all(isinstance(h, list) for h in hosts), "When enable_work_validation is True, hosts must be a list of lists."
-            assert all(isinstance(p, list) for p in ports), "When enable_work_validation is True, ports must be a list of lists."
+        self.redundant_distributed_servers = redundant_distributed_servers
+        if redundant_distributed_servers:
+            assert all(isinstance(h, list) for h in hosts), "When redundant_distributed_servers is True, hosts must be a list of lists."
+            assert all(isinstance(p, list) for p in ports), "When redundant_distributed_servers is True, ports must be a list of lists."
             assert len(hosts) == num_splits and len(ports) == num_splits, \
                 "Number of hosts and ports must match the number of splits."
 

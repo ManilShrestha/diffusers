@@ -995,7 +995,8 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
                 
                 for split_idx in range(self.transformer_server_split_config.config["num_splits"]):
                     # Redundant work for different servers parallel
-                    if self.transformer_server_split_config.enable_work_validation:
+                    if self.transformer_server_split_config.redundant_distributed_servers:
+                        # Get the number of threads to parallelize, this depends on the no. of distributed servers
                         p = len(self.transformer_server_split_config.config["hosts"][split_idx])
                         
                         def send_to_server(server_idx):
@@ -1012,7 +1013,7 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
                         torch.save(results,'/home/ms5267/blockentropy/models/results_socket.pth')
 
                         # Validate the returned results with LSH and result must be within threshold
-                        if self.validate_redundant_work(results):
+                        if len(results)>1 and self.validate_redundant_work(results):
                             output_intermediate = results[0]
                         else:
                             raise ValueError("Inconsistent results from distributed servers")
