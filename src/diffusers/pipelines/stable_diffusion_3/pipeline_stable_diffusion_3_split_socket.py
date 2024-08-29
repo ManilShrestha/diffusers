@@ -51,6 +51,8 @@ import concurrent.futures
 import torch.nn.functional as F
 import numpy as np
 
+import time
+
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
@@ -180,7 +182,8 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
     def __init__(
         self,
 
-        transformer_client_split: SD3Transformer2DModelClientSplit,
+        transformer_client_head_split: SD3Transformer2DModelClientSplit,
+        transformer_client_tail_split: SD3Transformer2DModelClientSplit,
         transformer_server_split_config: TransformerSplitConfig,
 
         scheduler: FlowMatchEulerDiscreteScheduler,
@@ -203,7 +206,8 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
             tokenizer_2=tokenizer_2,
             tokenizer_3=tokenizer_3,
 
-            transformer_client_split = transformer_client_split,
+            transformer_client_head_split = transformer_client_head_split,
+            transformer_client_tail_split = transformer_client_tail_split,
             transformer_server_split_config=transformer_server_split_config,
 
             scheduler=scheduler,
@@ -237,9 +241,14 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
         
         # Then send the data
         client_socket.sendall(serialized_data)
-
+        # print(host, port)
         # Receive the response
-        response_size = struct.unpack('>I', client_socket.recv(4))[0]
+        # Receive the response size
+        raw_response_size = client_socket.recv(4)
+        # print(f"Raw response size received: {raw_response_size}")
+
+        response_size = struct.unpack('>I', raw_response_size)[0]
+
         chunks = []
         bytes_recd = 0
         while bytes_recd < response_size:
@@ -720,6 +729,9 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
         """
         from scipy.fft import dctn
 
+        # TODO: Check the tensors themselves
+
+
         def perceptual_hash(tensor, hash_size=8):
             if len(tensor.shape) == 4:  # [N, C, H, W]
                 tensor = tensor.mean(dim=(0, 1))  # Average over N and C dimensions to get [H, W]
@@ -752,7 +764,10 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
         for t_idx in tensor_indices:
             base_hash = perceptual_hash(results[0][t_idx].to('cpu'))
             for r in results[1:]:
+                # print(torch.equal(results[0][t_idx].to('cpu'), r[t_idx].to('cpu')))
+
                 compare_hash = perceptual_hash(r[t_idx].to('cpu'))
+                print(hash_similarity(base_hash, compare_hash))
                 if hash_similarity(base_hash, compare_hash)<threshold:
                     return False
         
@@ -966,12 +981,18 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
             latents,
         )
 
-        self.transformer_client_split = self.transformer_client_split.to(device)
-
+        self.transformer_client_head_split = self.transformer_client_head_split.to(device).half()
+        self.transformer_client_tail_split = self.transformer_client_tail_split.to(device).half()
         
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+
+                iteration_start_time = time.time()
+                tmp_arr = []
+
+                # print(f'Denoising loop start: {time.time()}')
+
                 if self.interrupt:
                     continue
 
@@ -981,19 +1002,25 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
                 timestep = t.expand(latent_model_input.shape[0])
 
                 # Prepare the packet to send to splits
-                hidden_states, encoder_hidden_states, temb, height_, width_ = self.transformer_client_split(
-                        hidden_states=latent_model_input, 
-                        encoder_hidden_states=prompt_embeds, 
-                        pooled_projections=pooled_prompt_embeds, 
-                        timestep=timestep)
+                hidden_states, encoder_hidden_states, temb, height_, width_ = self.transformer_client_head_split(
+                        latent_model_input, 
+                        prompt_embeds, 
+                        pooled_prompt_embeds, 
+                        timestep)
                 
                 # Put them in cpu before passing sending to distributed servers
                 hidden_states, encoder_hidden_states, temb = hidden_states.to('cpu'), encoder_hidden_states.to('cpu'), temb.to('cpu')
 
                 output_intermediate = (hidden_states, encoder_hidden_states, temb, height_, width_)
 
+                start_time = time.time()
+                # print(f'First layer in client done: {time.time()-start_time}')
                 
                 for split_idx in range(self.transformer_server_split_config.config["num_splits"]):
+                    
+                    # Move each tensor to CPU if it is a tensor
+                    output_intermediate = tuple(op.cpu() if torch.is_tensor(op) else op for op in output_intermediate)
+                    
                     # Redundant work for different servers parallel
                     if self.transformer_server_split_config.redundant_distributed_servers:
                         # Get the number of threads to parallelize, this depends on the no. of distributed servers
@@ -1009,26 +1036,35 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
                         with concurrent.futures.ThreadPoolExecutor(max_workers=p) as executor:
                             futures = [executor.submit(send_to_server, server_idx) for server_idx in range(p)]
                             results = [future.result() for future in concurrent.futures.as_completed(futures)]
-                        
-                        torch.save(results,'/home/ms5267/blockentropy/models/results_socket.pth')
 
+                        validate_start_time = time.time()
                         # Validate the returned results with LSH and result must be within threshold
-                        if len(results)>1 and self.validate_redundant_work(results):
+                        if len(results)>1 and self.validate_redundant_work(results, threshold=self.transformer_server_split_config.config["validation_threshold"]):
                             output_intermediate = results[0]
                         else:
                             raise ValueError("Inconsistent results from distributed servers")
-                     
+
                     # No redundant work validation
                     else:
                         output_intermediate = self.send_request_to_transformer(output_intermediate
                                                                             ,host=self.transformer_server_split_config.config["hosts"][split_idx]
                                                                             ,port=self.transformer_server_split_config.config["ports"][split_idx])
-                    
-                    # if t==timesteps[-1] and split_idx==0:
-                    #     torch.save(output_intermediate,'/home/ms5267/blockentropy/models/output_intermediate.pth')
+                
+                
+                # Move each tensor to CPU if it is a tensor
+                output_intermediate = tuple(op.to(device) if torch.is_tensor(op) else op for op in output_intermediate)
+                hidden_states, encoder_hidden_states, temb, height_, width_ = output_intermediate
 
+                # Output from the server, now pass to the tail(last) layer in client
+                output_intermediate = self.transformer_client_tail_split(
+                                        hidden_states, 
+                                        encoder_hidden_states, 
+                                        temb, 
+                                        height_,
+                                        width_)
+                
                 # After final denoisification    
-                noise_pred = output_intermediate[0].to(device)   
+                noise_pred = output_intermediate[0]
 
                 # torch.save(noise_pred, '/home/ms5267/blockentropy/models/noise_2.pth')
                            
@@ -1065,6 +1101,10 @@ class StableDiffusion3PipelineSplitClientSocket(DiffusionPipeline, SD3LoraLoader
 
                 if XLA_AVAILABLE:
                     xm.mark_step()
+
+            # print(timing_arr)
+            # print("hash compare time=",hash_compare_time_arr)
+            # print("Iteration times = ", time_per_iteration_arr)
 
         if output_type == "latent":
             image = latents

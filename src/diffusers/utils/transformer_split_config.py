@@ -21,7 +21,7 @@ class TransformerSplitConfig:
         Returns the configuration as a string.
     """
     
-    def __init__(self, num_splits, hosts, ports, pipe_config, redundant_distributed_servers=False):
+    def __init__(self, num_splits, hosts, ports, pipe_config, redundant_distributed_servers=False, validation_threshold=0.99):
         # If enable_work_validation is True, the hosts and ports need to be lists of lists
         # Example: hosts: [[0.0.0.0,10.0.0.0], [2.2.2.2,3.3.3.3]]
         self.redundant_distributed_servers = redundant_distributed_servers
@@ -39,7 +39,8 @@ class TransformerSplitConfig:
             "num_splits": num_splits,
             "hosts": hosts,
             "ports": ports,
-            "pipe_config": pipe_config
+            "pipe_config": pipe_config,
+            "validation_threshold": validation_threshold,
         }
 
     def get_config(self):

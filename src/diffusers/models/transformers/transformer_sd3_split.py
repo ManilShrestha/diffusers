@@ -23,33 +23,54 @@ class SD3Transformer2DModelClientSplit(ModelMixin, ConfigMixin, PeftAdapterMixin
     Client side transformer. Preferably first block will be processed in client side.
     Hence, latent noise prediction and states remain hidden
     """
-    def __init__(self, config, blocks, time_text_embed_state_dict, context_embedder_state_dict, pos_embed_state_dict):
+    def __init__(self, config, blocks, has_last_block=False, *args):
         super().__init__()
         self.config_temp= config
         self.out_channels = self.config_temp.out_channels if self.config_temp.out_channels is not None else self.config_temp.in_channels
         self.inner_dim = self.config_temp.num_attention_heads * self.config_temp.attention_head_dim
-
-        self.pos_embed = PatchEmbed(
-            height=self.config_temp.sample_size,
-            width=self.config_temp.sample_size,
-            patch_size=self.config_temp.patch_size,
-            in_channels=self.config_temp.in_channels,
-            embed_dim=self.inner_dim,
-            pos_embed_max_size=self.config_temp.pos_embed_max_size,
-        )
-        self.pos_embed.load_state_dict(pos_embed_state_dict)
-
-        self.time_text_embed = CombinedTimestepTextProjEmbeddings(
-            embedding_dim=self.inner_dim, pooled_projection_dim=self.config_temp.pooled_projection_dim
-        )
-        self.time_text_embed.load_state_dict(time_text_embed_state_dict)
-
-        self.context_embedder = nn.Linear(self.config_temp.joint_attention_dim, self.config_temp.caption_projection_dim)
-        self.context_embedder.load_state_dict(context_embedder_state_dict)
-
         self.transformer_blocks = blocks
+        self.has_last_block = has_last_block
 
-    def forward(self, hidden_states, encoder_hidden_states, pooled_projections, timestep):
+        if not has_last_block: # If first transformer block
+            time_text_embed_state_dict, context_embedder_state_dict, pos_embed_state_dict = args[:3]
+            self.pos_embed = PatchEmbed(
+                height=self.config_temp.sample_size,
+                width=self.config_temp.sample_size,
+                patch_size=self.config_temp.patch_size,
+                in_channels=self.config_temp.in_channels,
+                embed_dim=self.inner_dim,
+                pos_embed_max_size=self.config_temp.pos_embed_max_size,
+            )
+            self.pos_embed.load_state_dict(pos_embed_state_dict)
+
+            self.time_text_embed = CombinedTimestepTextProjEmbeddings(
+                embedding_dim=self.inner_dim, pooled_projection_dim=self.config_temp.pooled_projection_dim
+            )
+            self.time_text_embed.load_state_dict(time_text_embed_state_dict)
+
+            self.context_embedder = nn.Linear(self.config_temp.joint_attention_dim, self.config_temp.caption_projection_dim)
+            self.context_embedder.load_state_dict(context_embedder_state_dict)
+
+        
+        if has_last_block: # If last transformer block let's load the required state_dicts
+            norm_out_state_dict, proj_out_state_dict = args[:2]
+
+            self.norm_out = AdaLayerNormContinuous(self.inner_dim, self.inner_dim, elementwise_affine=False, eps=1e-6)
+            self.norm_out.load_state_dict(norm_out_state_dict)
+            self.proj_out = nn.Linear(self.inner_dim, self.config_temp.patch_size * self.config_temp.patch_size * self.config_temp.out_channels, bias=True)
+            self.proj_out.load_state_dict(proj_out_state_dict)
+    
+
+    def forward(self, hidden_states, encoder_hidden_states, *args):
+        if not self.has_last_block:
+            pooled_projections, timestep = args[:2]
+            return self.forward_first(hidden_states, encoder_hidden_states, pooled_projections, timestep)
+        else:
+            temb, height_, width_ = args[:3]
+            return self.forward_last(hidden_states, encoder_hidden_states, temb, height_, width_)
+
+
+    def forward_first(self, hidden_states, encoder_hidden_states, pooled_projections, timestep):
         height_, width_ = hidden_states.shape[-2:]
 
         hidden_states = self.pos_embed(hidden_states)
@@ -68,37 +89,19 @@ class SD3Transformer2DModelClientSplit(ModelMixin, ConfigMixin, PeftAdapterMixin
             )
 
         return hidden_states, encoder_hidden_states, temb, height_, width_
-
-    @property
-    def config(self):
-        return self.config_temp
-
-
-class SD3Transformer2DModelServerSplit(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
-    def __init__(self, config, blocks, norm_out_state_dict, proj_out_state_dict, has_last_block=False):
-        super().__init__()
-        self.config_temp= config
-        self.has_last_block = has_last_block
-
-        self.inner_dim = self.config_temp.num_attention_heads * self.config_temp.attention_head_dim
-        self.transformer_blocks = blocks
-
-        self.norm_out = AdaLayerNormContinuous(self.inner_dim, self.inner_dim, elementwise_affine=False, eps=1e-6)
-        self.norm_out.load_state_dict(norm_out_state_dict)
-
-        self.proj_out = nn.Linear(self.inner_dim, self.config_temp.patch_size * self.config_temp.patch_size * self.config_temp.out_channels, bias=True)
-        self.proj_out.load_state_dict(proj_out_state_dict)
-
-    def forward(self, hidden_states, encoder_hidden_states, temb, height_, width_):
-        for block in self.transformer_blocks:
-            encoder_hidden_states, hidden_states = block(
+    
+    def forward_last(self, hidden_states, encoder_hidden_states, temb, height_, width_):
+        # Checking if it is just a single block or chain of blocks
+        if not isinstance(self.transformer_blocks, diffusers.models.attention.JointTransformerBlock):
+            for block in self.transformer_blocks:
+                encoder_hidden_states, hidden_states = block(
+                    hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
+                )
+        else:
+            encoder_hidden_states, hidden_states = self.transformer_blocks(
                 hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
             )
         
-        # If not last block, return the intermediate data for next blocks to process
-        if not self.has_last_block:
-            return hidden_states, encoder_hidden_states, temb, height_, width_
-
         # If it is the last block, further process and return the noise prediction
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)
@@ -118,6 +121,26 @@ class SD3Transformer2DModelServerSplit(ModelMixin, ConfigMixin, PeftAdapterMixin
         )
 
         return (output,)
+
+    @property
+    def config(self):
+        return self.config_temp
+
+
+class SD3Transformer2DModelServerSplit(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
+    def __init__(self, config, blocks):
+        super().__init__()
+        self.config_temp= config
+        self.inner_dim = self.config_temp.num_attention_heads * self.config_temp.attention_head_dim
+        self.transformer_blocks = blocks
+
+    def forward(self, hidden_states, encoder_hidden_states, temb, height_, width_):
+        for block in self.transformer_blocks:
+            encoder_hidden_states, hidden_states = block(
+                hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
+            )
+        
+        return hidden_states, encoder_hidden_states, temb, height_, width_
 
     @property
     def config(self):
